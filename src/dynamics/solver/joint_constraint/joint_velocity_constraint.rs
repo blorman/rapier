@@ -1,6 +1,6 @@
 use crate::dynamics::solver::joint_constraint::JointVelocityConstraintBuilder;
 use crate::dynamics::solver::DeltaVel;
-use crate::dynamics::{IntegrationParameters, JointData, JointGraphEdge, JointIndex};
+use crate::dynamics::{GenericJoint, IntegrationParameters, JointGraphEdge, JointIndex};
 use crate::math::{AngVector, AngularInertia, Isometry, Point, Real, Vector, DIM, SPATIAL_DIM};
 use crate::utils::{WDot, WReal};
 use simba::simd::SimdRealField;
@@ -13,10 +13,9 @@ use {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct MotorParameters<N: SimdRealField> {
-    pub stiffness: N,
-    pub damping: N,
-    pub gamma: N,
-    // pub keep_lhs: bool,
+    pub erp_inv_dt: N,
+    pub cfm_coeff: N,
+    pub cfm_gain: N,
     pub target_pos: N,
     pub target_vel: N,
     pub max_impulse: N,
@@ -25,10 +24,9 @@ pub struct MotorParameters<N: SimdRealField> {
 impl<N: SimdRealField> Default for MotorParameters<N> {
     fn default() -> Self {
         Self {
-            stiffness: N::zero(),
-            damping: N::zero(),
-            gamma: N::zero(),
-            // keep_lhs: true,
+            erp_inv_dt: N::zero(),
+            cfm_coeff: N::zero(),
+            cfm_gain: N::zero(),
             target_pos: N::zero(),
             target_vel: N::zero(),
             max_impulse: N::zero(),
@@ -73,6 +71,8 @@ pub struct JointVelocityConstraint<N: SimdRealField, const LANES: usize> {
     pub inv_lhs: N,
     pub rhs: N,
     pub rhs_wo_bias: N,
+    pub cfm_gain: N,
+    pub cfm_coeff: N,
 
     pub im1: Vector<N>,
     pub im2: Vector<N>,
@@ -92,6 +92,8 @@ impl<N: WReal, const LANES: usize> JointVelocityConstraint<N, LANES> {
             ang_jac1: na::zero(),
             ang_jac2: na::zero(),
             inv_lhs: N::zero(),
+            cfm_gain: N::zero(),
+            cfm_coeff: N::zero(),
             rhs: N::zero(),
             rhs_wo_bias: N::zero(),
             im1: na::zero(),
@@ -106,7 +108,7 @@ impl<N: WReal, const LANES: usize> JointVelocityConstraint<N, LANES> {
             self.ang_jac2.gdot(mj_lambda2.angular) - self.ang_jac1.gdot(mj_lambda1.angular);
 
         let rhs = dlinvel + dangvel + self.rhs;
-        let total_impulse = (self.impulse + self.inv_lhs * rhs)
+        let total_impulse = (self.impulse + self.inv_lhs * (rhs - self.cfm_gain * self.impulse))
             .simd_clamp(self.impulse_bounds[0], self.impulse_bounds[1]);
         let delta_impulse = total_impulse - self.impulse;
         self.impulse = total_impulse;
@@ -134,7 +136,7 @@ impl JointVelocityConstraint<Real, 1> {
         body2: &SolverBody<Real, 1>,
         frame1: &Isometry<Real>,
         frame2: &Isometry<Real>,
-        joint: &JointData,
+        joint: &GenericJoint,
         out: &mut [Self],
     ) -> usize {
         let mut len = 0;
@@ -150,42 +152,7 @@ impl JointVelocityConstraint<Real, 1> {
             locked_axes,
         );
 
-        for i in 0..DIM {
-            if locked_axes & (1 << i) != 0 {
-                out[len] =
-                    builder.lock_linear(params, [joint_id], body1, body2, i, WritebackId::Dof(i));
-                len += 1;
-            }
-        }
-        for i in DIM..SPATIAL_DIM {
-            if locked_axes & (1 << i) != 0 {
-                out[len] = builder.lock_angular(
-                    params,
-                    [joint_id],
-                    body1,
-                    body2,
-                    i - DIM,
-                    WritebackId::Dof(i),
-                );
-                len += 1;
-            }
-        }
-
-        for i in 0..DIM {
-            if motor_axes & (1 << i) != 0 {
-                out[len] = builder.motor_linear(
-                    params,
-                    [joint_id],
-                    body1,
-                    body2,
-                    locked_axes >> DIM,
-                    i,
-                    &joint.motors[i].motor_params(params.dt),
-                    WritebackId::Motor(i),
-                );
-                len += 1;
-            }
-        }
+        let start = len;
         for i in DIM..SPATIAL_DIM {
             if motor_axes & (1 << i) != 0 {
                 out[len] = builder.motor_angular(
@@ -199,21 +166,51 @@ impl JointVelocityConstraint<Real, 1> {
                 len += 1;
             }
         }
-
         for i in 0..DIM {
-            if limit_axes & (1 << i) != 0 {
-                out[len] = builder.limit_linear(
+            if motor_axes & (1 << i) != 0 {
+                let limits = if limit_axes & (1 << i) != 0 {
+                    Some([joint.limits[i].min, joint.limits[i].max])
+                } else {
+                    None
+                };
+
+                out[len] = builder.motor_linear(
                     params,
                     [joint_id],
                     body1,
                     body2,
                     i,
-                    [joint.limits[i].min, joint.limits[i].max],
-                    WritebackId::Limit(i),
+                    &joint.motors[i].motor_params(params.dt),
+                    limits,
+                    WritebackId::Motor(i),
                 );
                 len += 1;
             }
         }
+        JointVelocityConstraintBuilder::finalize_constraints(&mut out[start..len]);
+
+        let start = len;
+        for i in DIM..SPATIAL_DIM {
+            if locked_axes & (1 << i) != 0 {
+                out[len] = builder.lock_angular(
+                    params,
+                    [joint_id],
+                    body1,
+                    body2,
+                    i - DIM,
+                    WritebackId::Dof(i),
+                );
+                len += 1;
+            }
+        }
+        for i in 0..DIM {
+            if locked_axes & (1 << i) != 0 {
+                out[len] =
+                    builder.lock_linear(params, [joint_id], body1, body2, i, WritebackId::Dof(i));
+                len += 1;
+            }
+        }
+
         for i in DIM..SPATIAL_DIM {
             if limit_axes & (1 << i) != 0 {
                 out[len] = builder.limit_angular(
@@ -228,8 +225,22 @@ impl JointVelocityConstraint<Real, 1> {
                 len += 1;
             }
         }
+        for i in 0..DIM {
+            if limit_axes & (1 << i) != 0 {
+                out[len] = builder.limit_linear(
+                    params,
+                    [joint_id],
+                    body1,
+                    body2,
+                    i,
+                    [joint.limits[i].min, joint.limits[i].max],
+                    WritebackId::Limit(i),
+                );
+                len += 1;
+            }
+        }
+        JointVelocityConstraintBuilder::finalize_constraints(&mut out[start..len]);
 
-        JointVelocityConstraintBuilder::finalize_constraints(&mut out[..len]);
         len
     }
 
@@ -350,6 +361,8 @@ pub struct JointVelocityGroundConstraint<N: SimdRealField, const LANES: usize> {
     pub ang_jac2: AngVector<N>,
 
     pub inv_lhs: N,
+    pub cfm_coeff: N,
+    pub cfm_gain: N,
     pub rhs: N,
     pub rhs_wo_bias: N,
 
@@ -368,6 +381,8 @@ impl<N: WReal, const LANES: usize> JointVelocityGroundConstraint<N, LANES> {
             lin_jac: Vector::zeros(),
             ang_jac2: na::zero(),
             inv_lhs: N::zero(),
+            cfm_coeff: N::zero(),
+            cfm_gain: N::zero(),
             rhs: N::zero(),
             rhs_wo_bias: N::zero(),
             im2: na::zero(),
@@ -380,7 +395,7 @@ impl<N: WReal, const LANES: usize> JointVelocityGroundConstraint<N, LANES> {
         let dangvel = mj_lambda2.angular;
 
         let dvel = self.lin_jac.dot(&dlinvel) + self.ang_jac2.gdot(dangvel) + self.rhs;
-        let total_impulse = (self.impulse + self.inv_lhs * dvel)
+        let total_impulse = (self.impulse + self.inv_lhs * (dvel - self.cfm_gain * self.impulse))
             .simd_clamp(self.impulse_bounds[0], self.impulse_bounds[1]);
         let delta_impulse = total_impulse - self.impulse;
         self.impulse = total_impulse;
@@ -405,7 +420,7 @@ impl JointVelocityGroundConstraint<Real, 1> {
         body2: &SolverBody<Real, 1>,
         frame1: &Isometry<Real>,
         frame2: &Isometry<Real>,
-        joint: &JointData,
+        joint: &GenericJoint,
         out: &mut [Self],
     ) -> usize {
         let mut len = 0;
@@ -421,46 +436,7 @@ impl JointVelocityGroundConstraint<Real, 1> {
             locked_axes,
         );
 
-        for i in 0..DIM {
-            if locked_axes & (1 << i) != 0 {
-                out[len] = builder.lock_linear_ground(
-                    params,
-                    [joint_id],
-                    body1,
-                    body2,
-                    i,
-                    WritebackId::Dof(i),
-                );
-                len += 1;
-            }
-        }
-        for i in DIM..SPATIAL_DIM {
-            if locked_axes & (1 << i) != 0 {
-                out[len] = builder.lock_angular_ground(
-                    params,
-                    [joint_id],
-                    body1,
-                    body2,
-                    i - DIM,
-                    WritebackId::Dof(i),
-                );
-                len += 1;
-            }
-        }
-
-        for i in 0..DIM {
-            if motor_axes & (1 << i) != 0 {
-                out[len] = builder.motor_linear_ground(
-                    [joint_id],
-                    body1,
-                    body2,
-                    i,
-                    &joint.motors[i].motor_params(params.dt),
-                    WritebackId::Motor(i),
-                );
-                len += 1;
-            }
-        }
+        let start = len;
         for i in DIM..SPATIAL_DIM {
             if motor_axes & (1 << i) != 0 {
                 out[len] = builder.motor_angular_ground(
@@ -474,21 +450,57 @@ impl JointVelocityGroundConstraint<Real, 1> {
                 len += 1;
             }
         }
-
         for i in 0..DIM {
-            if limit_axes & (1 << i) != 0 {
-                out[len] = builder.limit_linear_ground(
+            if motor_axes & (1 << i) != 0 {
+                let limits = if limit_axes & (1 << i) != 0 {
+                    Some([joint.limits[i].min, joint.limits[i].max])
+                } else {
+                    None
+                };
+
+                out[len] = builder.motor_linear_ground(
                     params,
                     [joint_id],
                     body1,
                     body2,
                     i,
-                    [joint.limits[i].min, joint.limits[i].max],
-                    WritebackId::Limit(i),
+                    &joint.motors[i].motor_params(params.dt),
+                    limits,
+                    WritebackId::Motor(i),
                 );
                 len += 1;
             }
         }
+        JointVelocityConstraintBuilder::finalize_ground_constraints(&mut out[start..len]);
+
+        let start = len;
+        for i in DIM..SPATIAL_DIM {
+            if locked_axes & (1 << i) != 0 {
+                out[len] = builder.lock_angular_ground(
+                    params,
+                    [joint_id],
+                    body1,
+                    body2,
+                    i - DIM,
+                    WritebackId::Dof(i),
+                );
+                len += 1;
+            }
+        }
+        for i in 0..DIM {
+            if locked_axes & (1 << i) != 0 {
+                out[len] = builder.lock_linear_ground(
+                    params,
+                    [joint_id],
+                    body1,
+                    body2,
+                    i,
+                    WritebackId::Dof(i),
+                );
+                len += 1;
+            }
+        }
+
         for i in DIM..SPATIAL_DIM {
             if limit_axes & (1 << i) != 0 {
                 out[len] = builder.limit_angular_ground(
@@ -503,8 +515,22 @@ impl JointVelocityGroundConstraint<Real, 1> {
                 len += 1;
             }
         }
+        for i in 0..DIM {
+            if limit_axes & (1 << i) != 0 {
+                out[len] = builder.limit_linear_ground(
+                    params,
+                    [joint_id],
+                    body1,
+                    body2,
+                    i,
+                    [joint.limits[i].min, joint.limits[i].max],
+                    WritebackId::Limit(i),
+                );
+                len += 1;
+            }
+        }
+        JointVelocityConstraintBuilder::finalize_ground_constraints(&mut out[start..len]);
 
-        JointVelocityConstraintBuilder::finalize_ground_constraints(&mut out[..len]);
         len
     }
 
