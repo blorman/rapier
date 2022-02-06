@@ -297,7 +297,7 @@ impl JointVelocityConstraintBuilder<Real> {
         locked_axis: usize,
         writeback_id: WritebackId,
     ) -> JointGenericVelocityConstraint {
-        let ang_jac = self.ang_basis.column(locked_axis).into_owned();
+        let ang_jac = self.basis.column(locked_axis).into_owned();
 
         let mut constraint = self.lock_jacobians_generic(
             params,
@@ -318,7 +318,7 @@ impl JointVelocityConstraintBuilder<Real> {
         #[cfg(feature = "dim2")]
         let rhs_bias = self.ang_err.im * erp_inv_dt;
         #[cfg(feature = "dim3")]
-        let rhs_bias = self.ang_err.imag()[locked_axis] * erp_inv_dt;
+        let rhs_bias = self.ang_err[locked_axis] * erp_inv_dt;
         constraint.rhs += rhs_bias;
         constraint
     }
@@ -337,7 +337,7 @@ impl JointVelocityConstraintBuilder<Real> {
         limits: [Real; 2],
         writeback_id: WritebackId,
     ) -> JointGenericVelocityConstraint {
-        let ang_jac = self.ang_basis.column(limited_axis).into_owned();
+        let ang_jac = self.basis.column(limited_axis).into_owned();
 
         let mut constraint = self.lock_jacobians_generic(
             params,
@@ -354,21 +354,19 @@ impl JointVelocityConstraintBuilder<Real> {
             ang_jac,
         );
 
-        let s_limits = [(limits[0] / 2.0).sin(), (limits[1] / 2.0).sin()];
         #[cfg(feature = "dim2")]
-        let s_ang = self.ang_err.im;
+        let ang = self.ang_err.im;
         #[cfg(feature = "dim3")]
-        let s_ang = self.ang_err.imag()[limited_axis];
-        let min_enabled = s_ang < s_limits[0];
-        let max_enabled = s_limits[1] < s_ang;
+        let ang = self.ang_err[limited_axis];
+        let min_enabled = ang < limits[0];
+        let max_enabled = limits[1] < ang;
         let impulse_bounds = [
             min_enabled as u32 as Real * -Real::MAX,
             max_enabled as u32 as Real * Real::MAX,
         ];
 
         let erp_inv_dt = params.joint_erp_inv_dt();
-        let rhs_bias =
-            ((s_ang - s_limits[1]).max(0.0) - (s_limits[0] - s_ang).max(0.0)) * erp_inv_dt;
+        let rhs_bias = ((ang - limits[1]).max(0.0) - (limits[0] - ang).max(0.0)) * erp_inv_dt;
 
         constraint.rhs += rhs_bias;
         constraint.impulse_bounds = impulse_bounds;
@@ -389,7 +387,7 @@ impl JointVelocityConstraintBuilder<Real> {
         motor_params: &MotorParameters<Real>,
         writeback_id: WritebackId,
     ) -> JointGenericVelocityConstraint {
-        // let mut ang_jac = self.ang_basis.column(motor_axis).into_owned();
+        // let mut ang_jac = self.basis.column(motor_axis).into_owned();
         #[cfg(feature = "dim2")]
         let ang_jac = na::Vector1::new(1.0);
         #[cfg(feature = "dim3")]
@@ -413,11 +411,11 @@ impl JointVelocityConstraintBuilder<Real> {
         let mut rhs_wo_bias = 0.0;
         if motor_params.erp_inv_dt != 0.0 {
             #[cfg(feature = "dim2")]
-            let s_ang_dist = self.ang_err.im;
+            let ang_dist = self.ang_err;
             #[cfg(feature = "dim3")]
-            let s_ang_dist = self.ang_err.imag()[_motor_axis];
+            let ang_dist = self.ang_err[_motor_axis];
             let s_target_ang = motor_params.target_pos.sin();
-            rhs_wo_bias += (s_ang_dist - s_target_ang) * motor_params.erp_inv_dt;
+            rhs_wo_bias += (ang_dist - s_target_ang) * motor_params.erp_inv_dt;
         }
 
         let dvel = ang_jac.gdot(body2.angvel) - ang_jac.gdot(body1.angvel);
@@ -684,7 +682,7 @@ impl JointVelocityConstraintBuilder<Real> {
         locked_axis: usize,
         writeback_id: WritebackId,
     ) -> JointGenericVelocityGroundConstraint {
-        let ang_jac = self.ang_basis.column(locked_axis).into_owned();
+        let ang_jac = self.basis.column(locked_axis).into_owned();
 
         let mut constraint = self.lock_jacobians_generic_ground(
             params,
@@ -703,7 +701,7 @@ impl JointVelocityConstraintBuilder<Real> {
         #[cfg(feature = "dim2")]
         let rhs_bias = self.ang_err.im * erp_inv_dt;
         #[cfg(feature = "dim3")]
-        let rhs_bias = self.ang_err.imag()[locked_axis] * erp_inv_dt;
+        let rhs_bias = self.ang_err[locked_axis] * erp_inv_dt;
         constraint.rhs += rhs_bias;
         constraint
     }
@@ -720,7 +718,7 @@ impl JointVelocityConstraintBuilder<Real> {
         limits: [Real; 2],
         writeback_id: WritebackId,
     ) -> JointGenericVelocityGroundConstraint {
-        let ang_jac = self.ang_basis.column(limited_axis).into_owned();
+        let ang_jac = self.basis.column(limited_axis).into_owned();
 
         let mut constraint = self.lock_jacobians_generic_ground(
             params,
@@ -735,21 +733,20 @@ impl JointVelocityConstraintBuilder<Real> {
             ang_jac,
         );
 
-        let s_limits = [(limits[0] / 2.0).sin(), (limits[1] / 2.0).sin()];
+        let limits = [(limits[0] / 2.0).sin(), (limits[1] / 2.0).sin()];
         #[cfg(feature = "dim2")]
-        let s_ang = self.ang_err.im;
+        let ang = self.ang_err.im;
         #[cfg(feature = "dim3")]
-        let s_ang = self.ang_err.imag()[limited_axis];
-        let min_enabled = s_ang < s_limits[0];
-        let max_enabled = s_limits[1] < s_ang;
+        let ang = self.ang_err[limited_axis];
+        let min_enabled = ang < limits[0];
+        let max_enabled = limits[1] < ang;
         let impulse_bounds = [
             min_enabled as u32 as Real * -Real::MAX,
             max_enabled as u32 as Real * Real::MAX,
         ];
 
         let erp_inv_dt = params.joint_erp_inv_dt();
-        let rhs_bias =
-            ((s_ang - s_limits[1]).max(0.0) - (s_limits[0] - s_ang).max(0.0)) * erp_inv_dt;
+        let rhs_bias = ((ang - limits[1]).max(0.0) - (limits[0] - ang).max(0.0)) * erp_inv_dt;
 
         constraint.rhs += rhs_bias;
         constraint.impulse_bounds = impulse_bounds;
@@ -769,7 +766,7 @@ impl JointVelocityConstraintBuilder<Real> {
         motor_params: &MotorParameters<Real>,
         writeback_id: WritebackId,
     ) -> JointGenericVelocityGroundConstraint {
-        // let mut ang_jac = self.ang_basis.column(_motor_axis).into_owned();
+        // let mut ang_jac = self.basis.column(_motor_axis).into_owned();
         #[cfg(feature = "dim2")]
         let ang_jac = na::Vector1::new(1.0);
         #[cfg(feature = "dim3")]
@@ -791,11 +788,11 @@ impl JointVelocityConstraintBuilder<Real> {
         let mut rhs = 0.0;
         if motor_params.erp_inv_dt != 0.0 {
             #[cfg(feature = "dim2")]
-            let s_ang_dist = self.ang_err.im;
+            let ang_dist = self.ang_err.im;
             #[cfg(feature = "dim3")]
-            let s_ang_dist = self.ang_err.imag()[_motor_axis];
+            let ang_dist = self.ang_err[_motor_axis];
             let s_target_ang = motor_params.target_pos.sin();
-            rhs += (s_ang_dist - s_target_ang) * motor_params.erp_inv_dt;
+            rhs += (ang_dist - s_target_ang) * motor_params.erp_inv_dt;
         }
 
         let dvel = ang_jac.gdot(body2.angvel) - ang_jac.gdot(body1.angvel);
